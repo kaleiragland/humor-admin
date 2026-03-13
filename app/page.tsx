@@ -22,7 +22,7 @@ function LoginContent() {
     <main className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
       <div className="w-full max-w-md rounded-2xl bg-white/10 p-10 text-center shadow-2xl backdrop-blur-lg border border-white/20">
         <h1 className="text-3xl font-bold text-white mb-2">Admin Panel</h1>
-        <p className="text-sm text-purple-200 mb-8">Humor Project Management</p>
+        <p className="text-sm text-purple-200 mb-8">Humor Project</p>
 
         {error === 'not_admin' && (
           <div className="mb-6 rounded-lg bg-red-500/20 border border-red-500/50 p-4 text-sm text-red-200">
