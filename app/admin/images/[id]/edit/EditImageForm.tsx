@@ -34,6 +34,7 @@ export default function EditImageForm({ image }: { image: ImageData }) {
     setSuccess(false);
 
     const supabase = createClient();
+    const { data: { user } } = await supabase.auth.getUser();
     const { error: updateError } = await supabase
       .from('images')
       .update({
@@ -42,7 +43,7 @@ export default function EditImageForm({ image }: { image: ImageData }) {
         is_common_use: isCommonUse,
         image_description: description.trim() || null,
         additional_context: context.trim() || null,
-        modified_datetime_utc: new Date().toISOString(),
+        modified_by_user_id: user?.id,
       })
       .eq('id', image.id);
 

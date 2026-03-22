@@ -129,6 +129,7 @@ export default function CrudTable({
     setSaving(true);
     setError('');
     const supabase = createClient();
+    const { data: { user } } = await supabase.auth.getUser();
 
     const payload: Record<string, unknown> = {};
     columns.filter(c => c.editable !== false).forEach(c => {
@@ -141,8 +142,16 @@ export default function CrudTable({
       payload[c.key] = val;
     });
 
+    // Remove datetime fields — the DB sets these automatically
+    delete payload['created_datetime_utc'];
+    delete payload['modified_datetime_utc'];
+
     if (creatingRow) {
-      const { error: insertError } = await supabase.from(tableName).insert(payload);
+      const { error: insertError } = await supabase.from(tableName).insert({
+        ...payload,
+        created_by_user_id: user?.id,
+        modified_by_user_id: user?.id,
+      });
       if (insertError) {
         setError(insertError.message);
         setSaving(false);
@@ -151,7 +160,10 @@ export default function CrudTable({
     } else if (editingRow) {
       const { error: updateError } = await supabase
         .from(tableName)
-        .update(payload)
+        .update({
+          ...payload,
+          modified_by_user_id: user?.id,
+        })
         .eq(idField, editingRow[idField] as string);
       if (updateError) {
         setError(updateError.message);

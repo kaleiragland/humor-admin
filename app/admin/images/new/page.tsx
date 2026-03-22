@@ -33,8 +33,8 @@ export default function NewImagePage() {
       is_common_use: isCommonUse,
       image_description: description.trim() || null,
       profile_id: user?.id,
-      created_datetime_utc: new Date().toISOString(),
-      modified_datetime_utc: new Date().toISOString(),
+      created_by_user_id: user?.id,
+      modified_by_user_id: user?.id,
     });
 
     if (insertError) {
