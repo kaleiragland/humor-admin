@@ -61,37 +61,132 @@ export default async function DashboardPage() {
     .select('*', { count: 'exact', head: true })
     .gte('created_datetime_utc', weekAgo);
 
-  // Top voted captions
-  const { data: topCaptions } = await supabase
-    .from('caption_votes')
-    .select('caption_id, vote_value')
-    .eq('vote_value', 1);
+  // Fetch votes from the last 30 days, paginated past the 1000-row default limit
+  const thirtyDaysAgoDate = new Date();
+  thirtyDaysAgoDate.setUTCDate(thirtyDaysAgoDate.getUTCDate() - 30);
+  thirtyDaysAgoDate.setUTCHours(0, 0, 0, 0);
+  const thirtyDaysAgoIso = thirtyDaysAgoDate.toISOString();
 
-  const captionVoteCounts: Record<string, number> = {};
-  for (const v of topCaptions ?? []) {
-    captionVoteCounts[v.caption_id] = (captionVoteCounts[v.caption_id] || 0) + 1;
+  type VoteRow = {
+    caption_id: string;
+    vote_value: number;
+    created_datetime_utc: string;
+    created_by_user_id?: string | null;
+  };
+  const allVotes: VoteRow[] = [];
+  const pageSize = 1000;
+  for (let offset = 0; offset < 50000; offset += pageSize) {
+    const { data, error } = await supabase
+      .from('caption_votes')
+      .select('caption_id, vote_value, created_datetime_utc, created_by_user_id')
+      .gte('created_datetime_utc', thirtyDaysAgoIso)
+      .range(offset, offset + pageSize - 1);
+    if (error || !data || data.length === 0) break;
+    allVotes.push(...(data as VoteRow[]));
+    if (data.length < pageSize) break;
   }
-  const topCaptionIds = Object.entries(captionVoteCounts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([id, count]) => ({ id, count }));
 
-  let topCaptionDetails: { id: string; content: string; votes: number }[] = [];
-  if (topCaptionIds.length > 0) {
+  // Aggregate per-caption up/down counts
+  const captionEngagement: Record<string, { up: number; down: number }> = {};
+  for (const v of allVotes ?? []) {
+    const bucket = captionEngagement[v.caption_id] || { up: 0, down: 0 };
+    if (v.vote_value === 1) bucket.up++;
+    else if (v.vote_value === -1) bucket.down++;
+    captionEngagement[v.caption_id] = bucket;
+  }
+
+  const topCaptionIds = Object.entries(captionEngagement)
+    .map(([id, { up }]) => ({ id, count: up }))
+    .filter(c => c.count > 0)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+
+  // Most engaged = most total votes (up + down)
+  const mostEngagedIds = Object.entries(captionEngagement)
+    .map(([id, { up, down }]) => ({ id, up, down, total: up + down }))
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 5);
+
+  // Controversial = near 50/50 split with at least 3 votes
+  const controversialIds = Object.entries(captionEngagement)
+    .map(([id, { up, down }]) => {
+      const total = up + down;
+      const ratio = total > 0 ? Math.min(up, down) / total : 0;
+      return { id, up, down, total, ratio };
+    })
+    .filter(c => c.total >= 3)
+    .sort((a, b) => b.ratio - a.ratio || b.total - a.total)
+    .slice(0, 5);
+
+  // Hydrate all referenced caption ids in one query
+  const captionIdsToLookUp = Array.from(new Set([
+    ...topCaptionIds.map(c => c.id),
+    ...mostEngagedIds.map(c => c.id),
+    ...controversialIds.map(c => c.id),
+  ]));
+
+  const captionLookup: Record<string, string> = {};
+  if (captionIdsToLookUp.length > 0) {
     const { data: captionData } = await supabase
       .from('captions')
       .select('id, content')
-      .in('id', topCaptionIds.map(c => c.id));
-
-    topCaptionDetails = topCaptionIds.map(tc => {
-      const caption = captionData?.find(c => c.id === tc.id);
-      return {
-        id: tc.id,
-        content: caption?.content || 'Unknown',
-        votes: tc.count,
-      };
-    });
+      .in('id', captionIdsToLookUp);
+    for (const c of captionData ?? []) {
+      captionLookup[c.id] = c.content;
+    }
   }
+
+  const topCaptionDetails = topCaptionIds.map(tc => ({
+    id: tc.id,
+    content: captionLookup[tc.id] || 'Unknown',
+    votes: tc.count,
+  }));
+
+  const mostEngagedCaptions = mostEngagedIds.map(c => ({
+    ...c,
+    content: captionLookup[c.id] || 'Unknown',
+  }));
+
+  const controversialCaptions = controversialIds.map(c => ({
+    ...c,
+    content: captionLookup[c.id] || 'Unknown',
+  }));
+
+  // Daily rating volume over the last 30 days
+  const dayKeys: string[] = [];
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(today);
+    d.setUTCDate(today.getUTCDate() - i);
+    dayKeys.push(d.toISOString().split('T')[0]);
+  }
+  const dayCounts: Record<string, number> = Object.fromEntries(dayKeys.map(k => [k, 0]));
+  for (const v of allVotes ?? []) {
+    const day = v.created_datetime_utc?.slice(0, 10);
+    if (day && day in dayCounts) dayCounts[day]++;
+  }
+  const dailyVotes = dayKeys.map(day => ({ day, count: dayCounts[day] }));
+  const maxDailyVotes = Math.max(1, ...dailyVotes.map(d => d.count));
+  const totalVotesInWindow = dailyVotes.reduce((sum, d) => sum + d.count, 0);
+
+  // Rating coverage: how many captions have been rated at all
+  const ratedCaptionCount = Object.keys(captionEngagement).length;
+  const unratedCaptionCount = Math.max(0, (captionCount ?? 0) - ratedCaptionCount);
+  const coveragePct = captionCount
+    ? ((ratedCaptionCount / captionCount) * 100).toFixed(1)
+    : '0';
+
+  // Top raters (within the last 30 days)
+  const raterCounts: Record<string, number> = {};
+  for (const v of allVotes) {
+    if (v.created_by_user_id) {
+      raterCounts[v.created_by_user_id] = (raterCounts[v.created_by_user_id] || 0) + 1;
+    }
+  }
+  const topRaters = Object.entries(raterCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
 
   // Most active uploaders (by image count)
   const { data: allImages } = await supabase
@@ -279,9 +374,9 @@ export default async function DashboardPage() {
                   {i + 1}
                 </span>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-slate-300 truncate font-mono">{profileId.slice(0, 8)}...</p>
+                  <p className="text-sm text-slate-300 truncate font-mono" title={profileId}>{profileId}</p>
                 </div>
-                <span className="text-sm text-slate-400">{count} images</span>
+                <span className="text-sm text-slate-400 flex-shrink-0">{count} images</span>
               </div>
             ))}
             {topUploaders.length === 0 && (
@@ -289,6 +384,160 @@ export default async function DashboardPage() {
             )}
           </div>
         </div>
+      </div>
+
+      {/* Caption Rating Activity */}
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-2xl font-bold text-white">Caption Rating Activity</h2>
+          <p className="text-sm text-slate-400 mt-1">
+            How users have been rating captions over the last 30 days.
+          </p>
+        </div>
+
+        {/* Rating coverage cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="rounded-xl bg-slate-800/50 border border-slate-700 p-6">
+            <p className="text-sm text-slate-400">Rated Captions</p>
+            <p className="text-2xl font-bold text-white mt-1">
+              {ratedCaptionCount.toLocaleString()}
+            </p>
+            <p className="text-xs text-slate-500 mt-1">{coveragePct}% of all captions</p>
+          </div>
+          <div className="rounded-xl bg-slate-800/50 border border-slate-700 p-6">
+            <p className="text-sm text-slate-400">Unrated Captions</p>
+            <p className="text-2xl font-bold text-white mt-1">
+              {unratedCaptionCount.toLocaleString()}
+            </p>
+            <p className="text-xs text-slate-500 mt-1">Awaiting first vote</p>
+          </div>
+          <div className="rounded-xl bg-slate-800/50 border border-slate-700 p-6">
+            <p className="text-sm text-slate-400">Avg Votes / Rated Caption</p>
+            <p className="text-2xl font-bold text-white mt-1">
+              {ratedCaptionCount && voteCount
+                ? (voteCount / ratedCaptionCount).toFixed(2)
+                : '0'}
+            </p>
+            <p className="text-xs text-slate-500 mt-1">Engagement depth</p>
+          </div>
+        </div>
+
+        {/* Daily rating activity chart */}
+        <div className="rounded-xl bg-slate-800/50 border border-slate-700 p-6">
+          <div className="flex items-baseline justify-between mb-4">
+            <h3 className="text-lg font-semibold text-white">Rating Volume (Last 30 Days)</h3>
+            <span className="text-xs text-slate-500">
+              {totalVotesInWindow.toLocaleString()} votes in window
+            </span>
+          </div>
+          {totalVotesInWindow === 0 ? (
+            <div className="h-40 flex items-center justify-center text-sm text-slate-500">
+              No votes cast in the last 30 days.
+            </div>
+          ) : (
+            <div className="flex gap-1">
+              {dailyVotes.map(({ day, count }) => (
+                <div key={day} className="flex-1 flex flex-col items-center group">
+                  <div className="h-40 w-full flex items-end">
+                    <div
+                      className="w-full bg-gradient-to-t from-purple-600 to-pink-500 rounded-t min-h-[2px] transition group-hover:from-purple-500 group-hover:to-pink-400"
+                      style={{ height: `${(count / maxDailyVotes) * 100}%` }}
+                      title={`${day}: ${count} votes`}
+                    />
+                  </div>
+                  <span className="text-[9px] text-slate-500 mt-1">
+                    {day.slice(8)}
+                  </span>
+                  <span className="text-[9px] text-slate-400 opacity-0 group-hover:opacity-100 transition absolute -mt-2">
+                    {count}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Most engaged + Controversial */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="rounded-xl bg-slate-800/50 border border-slate-700 p-6">
+            <h3 className="text-lg font-semibold text-white mb-1">Most Engaged Captions</h3>
+            <p className="text-xs text-slate-500 mb-4">Most votes in the last 30 days</p>
+            <div className="space-y-3">
+              {mostEngagedCaptions.map((cap, i) => (
+                <div key={cap.id} className="flex items-start gap-3">
+                  <span className="flex-shrink-0 w-6 h-6 rounded-full bg-pink-600/30 text-pink-300 text-xs flex items-center justify-center font-bold">
+                    {i + 1}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-slate-300 truncate">&quot;{cap.content}&quot;</p>
+                    <p className="text-xs text-slate-500">
+                      {cap.total} total · {cap.up} up · {cap.down} down
+                    </p>
+                  </div>
+                </div>
+              ))}
+              {mostEngagedCaptions.length === 0 && (
+                <p className="text-sm text-slate-500">No vote data available</p>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-xl bg-slate-800/50 border border-slate-700 p-6">
+            <h3 className="text-lg font-semibold text-white mb-1">Most Controversial Captions</h3>
+            <p className="text-xs text-slate-500 mb-4">Closest to a 50/50 split (min 3 votes)</p>
+            <div className="space-y-3">
+              {controversialCaptions.map((cap, i) => (
+                <div key={cap.id} className="flex items-start gap-3">
+                  <span className="flex-shrink-0 w-6 h-6 rounded-full bg-orange-600/30 text-orange-300 text-xs flex items-center justify-center font-bold">
+                    {i + 1}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-slate-300 truncate">&quot;{cap.content}&quot;</p>
+                    <p className="text-xs text-slate-500">
+                      {(cap.ratio * 100).toFixed(0)}% split · {cap.up} up · {cap.down} down
+                    </p>
+                  </div>
+                </div>
+              ))}
+              {controversialCaptions.length === 0 && (
+                <p className="text-sm text-slate-500">Not enough votes yet</p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Top raters */}
+        {topRaters.length > 0 && (
+          <div className="rounded-xl bg-slate-800/50 border border-slate-700 p-6">
+            <div className="flex items-baseline justify-between mb-1">
+              <h3 className="text-lg font-semibold text-white">Top Raters</h3>
+              <span className="text-xs text-slate-500">
+                {topRaters.length} active rater{topRaters.length === 1 ? '' : 's'}
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mb-4">Most votes cast in the last 30 days</p>
+            <div className="space-y-3">
+              {topRaters.map(([userId, count], i) => (
+                <div key={userId} className="flex items-center gap-3">
+                  <span className="flex-shrink-0 w-6 h-6 rounded-full bg-amber-600/30 text-amber-300 text-xs flex items-center justify-center font-bold">
+                    {i + 1}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-slate-300 truncate font-mono" title={userId}>
+                      {userId}
+                    </p>
+                  </div>
+                  <span className="text-sm text-slate-400 flex-shrink-0">{count} votes</span>
+                </div>
+              ))}
+            </div>
+            {topRaters.length === 1 && (
+              <p className="text-xs text-slate-500 mt-4 italic">
+                Only one user has rated captions so far.
+              </p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
