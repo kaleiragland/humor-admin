@@ -61,6 +61,29 @@ export default function CrudTable({
   const resolvedBasePath = basePath || `/admin/${tableName.replace(/_/g, '-')}`;
   const selectFields = columns.map(c => c.key).join(', ') + (columns.some(c => c.key === idField) ? '' : `, ${idField}`);
 
+  const friendlyDbError = (message: string): string => {
+    const nullMatch = message.match(/null value in column "([^"]+)"/i);
+    if (nullMatch) {
+      const col = columns.find(c => c.key === nullMatch[1]);
+      return `${col?.label || nullMatch[1]} is required. Please fill it in and try again.`;
+    }
+    const fkMatch = message.match(/foreign key constraint "([^"]+)"/i);
+    if (fkMatch) {
+      const childTableMatch = message.match(/foreign key constraint "[^"]+" on table "([^"]+)"/i);
+      if (childTableMatch) {
+        const childTable = childTableMatch[1].replace(/_/g, ' ');
+        return `Can't delete this row because there are still ${childTable} that reference it. Please delete those first.`;
+      }
+      const col = columns.find(c => fkMatch[1].endsWith(`_${c.key}_fkey`));
+      const label = col?.label || 'one of the fields';
+      return `The value you entered for ${label} doesn't match an existing record. Please pick a valid one.`;
+    }
+    if (/duplicate key|unique constraint/i.test(message)) {
+      return 'That value is already in use. Please choose a different one.';
+    }
+    return message;
+  };
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -80,7 +103,7 @@ export default function CrudTable({
     const { data, count: totalCount, error: fetchError } = await query;
 
     if (fetchError) {
-      setError(fetchError.message);
+      setError(friendlyDbError(fetchError.message));
       // Try without ordering if column doesn't exist
       if (fetchError.message.includes(orderBy)) {
         const retryQuery = supabase
@@ -153,7 +176,7 @@ export default function CrudTable({
         modified_by_user_id: user?.id,
       });
       if (insertError) {
-        setError(insertError.message);
+        setError(friendlyDbError(insertError.message));
         setSaving(false);
         return;
       }
@@ -166,7 +189,7 @@ export default function CrudTable({
         })
         .eq(idField, editingRow[idField] as string);
       if (updateError) {
-        setError(updateError.message);
+        setError(friendlyDbError(updateError.message));
         setSaving(false);
         return;
       }
@@ -186,7 +209,7 @@ export default function CrudTable({
       .delete()
       .eq(idField, row[idField] as string);
     if (deleteError) {
-      setError(deleteError.message);
+      setError(friendlyDbError(deleteError.message));
       return;
     }
     fetchData();

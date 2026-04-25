@@ -7,8 +7,8 @@ import type { ColumnDef } from '@/app/components/CrudTable';
 const columns: ColumnDef[] = [
   { key: 'id', label: 'ID', type: 'number', editable: false },
   { key: 'name', label: 'Name', type: 'text', required: true },
-  { key: 'llm_provider_id', label: 'Provider ID', type: 'number' },
-  { key: 'provider_model_id', label: 'Provider Model ID', type: 'text', required: true },
+  { key: 'llm_provider_id', label: 'Provider ID', type: 'number', required: true },
+  { key: 'provider_model_id', label: 'Provider Model Name', type: 'text', required: true },
   { key: 'is_temperature_supported', label: 'Temp Supported', type: 'boolean', defaultValue: true },
   { key: 'created_datetime_utc', label: 'Created', editable: false },
 ];
